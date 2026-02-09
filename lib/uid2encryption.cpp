@@ -10,6 +10,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include <array>
 #include <memory>
 #include <stdexcept>
 #include <unordered_map>
@@ -27,16 +28,20 @@ enum class PayloadType : std::uint8_t {
 static const int GCM_AUTHTAG_LENGTH = 16;
 static const int GCM_IV_LENGTH = 12;
 
+static constexpr size_t MAX_TOKEN_SIZE = 512;
+
+static int Decrypt(const std::uint8_t* data, int size, const std::uint8_t* iv, const std::uint8_t* secret, std::uint8_t* out_decrypted);
+
 static void Decrypt(const std::uint8_t* data, int size, const std::uint8_t* iv, const std::uint8_t* secret, std::vector<std::uint8_t>& out_decrypted);
 
 static int EncryptGCM(const std::uint8_t* data, int size, const std::uint8_t* iv, const std::uint8_t* secret, std::uint8_t* out_encrypted);
 
 static IdentityScope DecodeIdentityScopeV3(std::uint8_t value);
 
-static DecryptionResult DecryptTokenV2(const std::vector<std::uint8_t>& encryptedId, const KeyContainer& keys, Timestamp now, bool checkValidity);
+static DecryptionResult DecryptTokenV2(const std::uint8_t* encryptedId, int encryptedIdLen, const KeyContainer& keys, Timestamp now, bool checkValidity);
 
 static DecryptionResult
-DecryptTokenV3(const std::vector<std::uint8_t>& encryptedId, const KeyContainer& keys, Timestamp now, IdentityScope identityScope, bool checkValidity);
+DecryptTokenV3(const std::uint8_t* encryptedId, int encryptedIdLen, const KeyContainer& keys, Timestamp now, IdentityScope identityScope, bool checkValidity);
 
 DecryptionResult DecryptToken(const std::string& token, const KeyContainer& keys, Timestamp now, IdentityScope identityScope, bool checkValidity)
 {
@@ -47,37 +52,39 @@ DecryptionResult DecryptToken(const std::string& token, const KeyContainer& keys
     // check the whole ad token string instead of the headerStr to make sure
     const bool isBase64UrlEncoding = std::any_of(token.begin(), token.end(), [](char c) { return c == '-' || c == '_'; });
     try {
-        std::vector<std::uint8_t> encryptedId;
-        std::vector<std::uint8_t> headerBytes;
+        std::array<std::uint8_t, MAX_TOKEN_SIZE> encryptedId;
+        std::array<std::uint8_t, 4> headerBytes;
         const std::string headerStr = token.substr(0, 4);
 
+        size_t headerLen;
         if (isBase64UrlEncoding) {
-            uid2::UID2Base64UrlCoder::Decode(headerStr, headerBytes);
+            headerLen = uid2::UID2Base64UrlCoder::Decode(headerStr, headerBytes.data());
         } else {
-            macaron::Base64::Decode(headerStr, headerBytes);
+            headerLen = macaron::Base64::Decode(headerStr, headerBytes.data());
         }
 
-        if (headerBytes.size() < 2) {
+        if (headerLen < 2) {
             return DecryptionResult::MakeError(DecryptionStatus::INVALID_PAYLOAD);
         }
 
         if (headerBytes[0] == 2) {
-            macaron::Base64::Decode(token, encryptedId);
-            return DecryptTokenV2(encryptedId, keys, now, checkValidity);
+            const auto encryptedIdLen = macaron::Base64::Decode(token, encryptedId.data());
+            return DecryptTokenV2(encryptedId.data(), static_cast<int>(encryptedIdLen), keys, now, checkValidity);
         }
         if (headerBytes[1] == static_cast<std::uint8_t>(AdvertisingTokenVersion::V3)) {
-            macaron::Base64::Decode(token, encryptedId);
-            return DecryptTokenV3(encryptedId, keys, now, identityScope, checkValidity);
+            const auto encryptedIdLen = macaron::Base64::Decode(token, encryptedId.data());
+            return DecryptTokenV3(encryptedId.data(), static_cast<int>(encryptedIdLen), keys, now, identityScope, checkValidity);
         }
         if (headerBytes[1] == static_cast<std::uint8_t>(AdvertisingTokenVersion::V4)) {
+            size_t encryptedIdLen;
             if (isBase64UrlEncoding) {
                 // same as V3 but use Base64URL encoding
-                uid2::UID2Base64UrlCoder::Decode(token, encryptedId);
+                encryptedIdLen = uid2::UID2Base64UrlCoder::Decode(token, encryptedId.data());
             } else {
                 // handling the rare situation where participant changed the encoding from Base64URL to Base64
-                macaron::Base64::Decode(token, encryptedId);
+                encryptedIdLen = macaron::Base64::Decode(token, encryptedId.data());
             }
-            return DecryptTokenV3(encryptedId, keys, now, identityScope, checkValidity);
+            return DecryptTokenV3(encryptedId.data(), static_cast<int>(encryptedIdLen), keys, now, identityScope, checkValidity);
         }
         return DecryptionResult::MakeError(DecryptionStatus::INVALID_PAYLOAD);
     } catch (...) {
@@ -85,9 +92,9 @@ DecryptionResult DecryptToken(const std::string& token, const KeyContainer& keys
     }
 }
 
-static DecryptionResult DecryptTokenV2(const std::vector<std::uint8_t>& encryptedId, const KeyContainer& keys, Timestamp now, bool checkValidity)
+static DecryptionResult DecryptTokenV2(const std::uint8_t* encryptedId, int encryptedIdLen, const KeyContainer& keys, Timestamp now, bool checkValidity)
 {
-    BigEndianByteReader reader(encryptedId);
+    BigEndianByteReader reader(encryptedId, encryptedIdLen);
 
     const int version = static_cast<int>(reader.ReadByte());
     if (version != 2) {
@@ -104,10 +111,10 @@ static DecryptionResult DecryptTokenV2(const std::vector<std::uint8_t>& encrypte
     std::uint8_t iv[BLOCK_SIZE];
     reader.ReadBytes(iv, 0, sizeof(iv));
 
-    std::vector<std::uint8_t> masterDecrypted;
-    Decrypt(&encryptedId[21], static_cast<int>(encryptedId.size()) - 21, iv, masterKey->secret_.data(), masterDecrypted);
+    std::array<std::uint8_t, 256> masterDecrypted;
+    const int masterDecryptedLen = Decrypt(&encryptedId[21], encryptedIdLen - 21, iv, masterKey->secret_.data(), masterDecrypted.data());
 
-    BigEndianByteReader masterPayloadReader(masterDecrypted);
+    BigEndianByteReader masterPayloadReader(masterDecrypted.data(), masterDecryptedLen);
 
     const Timestamp expires = Timestamp::FromEpochMilli(masterPayloadReader.ReadInt64());
     const int siteKeyId = masterPayloadReader.ReadInt32();
@@ -117,10 +124,10 @@ static DecryptionResult DecryptTokenV2(const std::vector<std::uint8_t>& encrypte
     }
 
     masterPayloadReader.ReadBytes(iv, 0, BLOCK_SIZE);
-    std::vector<std::uint8_t> identityDecrypted;
-    Decrypt(&masterDecrypted[28], static_cast<int>(masterDecrypted.size()) - 28, iv, siteKey->secret_.data(), identityDecrypted);
+    std::array<std::uint8_t, 256> identityDecrypted;
+    const int identityDecryptedLen = Decrypt(&masterDecrypted[28], masterDecryptedLen - 28, iv, siteKey->secret_.data(), identityDecrypted.data());
 
-    BigEndianByteReader identityPayloadReader(identityDecrypted);
+    BigEndianByteReader identityPayloadReader(identityDecrypted.data(), identityDecryptedLen);
 
     const int siteId = identityPayloadReader.ReadInt32();
     const std::int32_t idLength = identityPayloadReader.ReadInt32();
@@ -140,9 +147,9 @@ static DecryptionResult DecryptTokenV2(const std::vector<std::uint8_t>& encrypte
 }
 
 static DecryptionResult
-DecryptTokenV3(const std::vector<std::uint8_t>& encryptedId, const KeyContainer& keys, Timestamp now, IdentityScope identityScope, bool checkValidity)
+DecryptTokenV3(const std::uint8_t* encryptedId, int encryptedIdLen, const KeyContainer& keys, Timestamp now, IdentityScope identityScope, bool checkValidity)
 {
-    BigEndianByteReader reader(encryptedId);
+    BigEndianByteReader reader(encryptedId, encryptedIdLen);
 
     const auto prefix = reader.ReadByte();
     if (DecodeIdentityScopeV3(prefix) != identityScope) {
@@ -157,13 +164,13 @@ DecryptTokenV3(const std::vector<std::uint8_t>& encryptedId, const KeyContainer&
         return DecryptionResult::MakeError(DecryptionStatus::NOT_AUTHORIZED_FOR_KEY);
     }
 
-    std::uint8_t masterPayload[256];
-    if (reader.GetRemainingSize() > static_cast<int>(sizeof(masterPayload))) {
+    std::array<std::uint8_t, 256> masterPayload;
+    if (reader.GetRemainingSize() > static_cast<int>(masterPayload.size())) {
         return DecryptionResult::MakeError(DecryptionStatus::INVALID_PAYLOAD);
     }
-    const int masterPayloadLen = DecryptGCM(reader.GetCurrentData(), reader.GetRemainingSize(), masterKey->secret_.data(), masterPayload);
+    const int masterPayloadLen = DecryptGCM(reader.GetCurrentData(), reader.GetRemainingSize(), masterKey->secret_.data(), masterPayload.data());
 
-    BigEndianByteReader masterPayloadReader(masterPayload, masterPayloadLen);
+    BigEndianByteReader masterPayloadReader(masterPayload.data(), masterPayloadLen);
 
     const Timestamp expires = Timestamp::FromEpochMilli(masterPayloadReader.ReadInt64());
     /*const Timestamp created = */ Timestamp::FromEpochMilli(masterPayloadReader.ReadInt64());
@@ -179,13 +186,13 @@ DecryptTokenV3(const std::vector<std::uint8_t>& encryptedId, const KeyContainer&
         return DecryptionResult::MakeError(DecryptionStatus::NOT_AUTHORIZED_FOR_KEY);
     }
 
-    std::uint8_t sitePayload[128];
-    if (masterPayloadReader.GetRemainingSize() > static_cast<int>(sizeof(sitePayload))) {
+    std::array<std::uint8_t, 128> sitePayload;
+    if (masterPayloadReader.GetRemainingSize() > static_cast<int>(sitePayload.size())) {
         return DecryptionResult::MakeError(DecryptionStatus::INVALID_PAYLOAD);
     }
-    const auto sitePayloadLen = DecryptGCM(masterPayloadReader.GetCurrentData(), masterPayloadReader.GetRemainingSize(), siteKey->secret_.data(), sitePayload);
+    const auto sitePayloadLen = DecryptGCM(masterPayloadReader.GetCurrentData(), masterPayloadReader.GetRemainingSize(), siteKey->secret_.data(), sitePayload.data());
 
-    BigEndianByteReader sitePayloadReader(sitePayload, sitePayloadLen);
+    BigEndianByteReader sitePayloadReader(sitePayload.data(), sitePayloadLen);
 
     const auto siteId = sitePayloadReader.ReadInt32();
     /*const auto publisherId = */ sitePayloadReader.ReadInt64();
@@ -199,9 +206,7 @@ DecryptTokenV3(const std::vector<std::uint8_t>& encryptedId, const KeyContainer&
         return DecryptionResult::MakeError(DecryptionStatus::EXPIRED_TOKEN, established, siteId, siteKey->siteId_);
     }
 
-    const std::vector<std::uint8_t> identityBytes(
-        sitePayloadReader.GetCurrentData(), sitePayloadReader.GetCurrentData() + sitePayloadReader.GetRemainingSize());
-    auto idString = macaron::Base64::Encode(identityBytes);
+    auto idString = macaron::Base64::Encode(sitePayloadReader.GetCurrentData(), sitePayloadReader.GetRemainingSize());
 
     return DecryptionResult::MakeSuccess(std::move(idString), established, siteId, siteKey->siteId_);
 }
@@ -362,21 +367,28 @@ static DecryptionDataResult DecryptDataV3(const std::vector<std::uint8_t>& encry
     return DecryptionDataResult::MakeSuccess({payloadReader.GetCurrentData(), payloadReader.GetCurrentData() + payloadReader.GetRemainingSize()}, encryptedAt);
 }
 
-void Decrypt(const std::uint8_t* data, int size, const std::uint8_t* iv, const std::uint8_t* secret, std::vector<std::uint8_t>& out_decrypted)
+int Decrypt(const std::uint8_t* data, int size, const std::uint8_t* iv, const std::uint8_t* secret, std::uint8_t* out_decrypted)
 {
     AES256 aes;
     const int paddedSize = static_cast<int>(aes.GetPaddingLength(size));
     if (paddedSize != size || size < 16) {
         throw "invalid input";
     }
-    out_decrypted.resize(paddedSize);
-    aes.DecryptCBC(data, size, secret, iv, out_decrypted.data());
+    aes.DecryptCBC(data, size, secret, iv, out_decrypted);
     // Remove PKCS7 padding
     const int padlen = out_decrypted[size - 1];
     if (padlen < 1 || padlen > 16) {
         throw "invalid pkcs7 padding";
     }
-    out_decrypted.resize(size - padlen);
+    return size - padlen;
+}
+
+void Decrypt(const std::uint8_t* data, int size, const std::uint8_t* iv, const std::uint8_t* secret, std::vector<std::uint8_t>& out_decrypted)
+{
+    AES256 aes;
+    const int paddedSize = static_cast<int>(aes.GetPaddingLength(size));
+    out_decrypted.resize(paddedSize);
+    out_decrypted.resize(Decrypt(data, size, iv, secret, out_decrypted.data()));
 }
 
 template <typename T, typename D>

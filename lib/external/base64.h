@@ -27,6 +27,7 @@
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -95,8 +96,7 @@ namespace macaron {
 
     class Base64 {
     private:
-        static std::string Encode(const std::vector<uint8_t>& data, const char* sEncodingTable) {
-            size_t in_len = data.size();
+        static std::string Encode(const uint8_t* data, size_t in_len, const char* sEncodingTable) {
             size_t out_len = 4 * ((in_len + 2) / 3);
             std::string ret(out_len, '\0');
             size_t i;
@@ -123,14 +123,23 @@ namespace macaron {
             return ret;
         }
 
-        static void Decode(const std::string& input, const unsigned char* kDecodingTable, std::vector<uint8_t>& out) {
+        static std::string Encode(const std::vector<uint8_t>& data, const char* sEncodingTable) {
+            return Encode(data.data(), data.size(), sEncodingTable);
+        }
+
+        static size_t DecodedLength(const std::string& input) {
             size_t in_len = input.size();
-
             size_t out_len = in_len / 4 * 3;
-            if (input[in_len - 1] == '=') out_len--;
-            if (input[in_len - 2] == '=') out_len--;
+            if (in_len >= 2) {
+                if (input[in_len - 1] == '=') out_len--;
+                if (input[in_len - 2] == '=') out_len--;
+            }
+            return out_len;
+        }
 
-            out.resize(out_len);
+        static size_t Decode(const std::string& input, const unsigned char* kDecodingTable, uint8_t* out) {
+            size_t in_len = input.size();
+            size_t out_len = DecodedLength(input);
 
             for (size_t i = 0, j = 0; i < in_len;) {
                 uint32_t a = input[i] == '=' ? 0 & i++ : kDecodingTable[static_cast<int>(input[i++])];
@@ -144,9 +153,19 @@ namespace macaron {
                 if (j < out_len) out[j++] = (triple >> 1 * 8) & 0xFF;
                 if (j < out_len) out[j++] = (triple >> 0 * 8) & 0xFF;
             }
+            return out_len;
+        }
+
+        static void Decode(const std::string& input, const unsigned char* kDecodingTable, std::vector<uint8_t>& out) {
+            out.resize(DecodedLength(input));
+            Decode(input, kDecodingTable, out.data());
         }
 
     public:
+
+        static std::string Encode(const uint8_t* data, size_t len) {
+            return Encode(data, len, base64EncodingTable);
+        }
 
         static std::string Encode(const std::vector<uint8_t>& data) {
             return Encode(data, base64EncodingTable);
@@ -167,12 +186,35 @@ namespace macaron {
             return ret;
         }
 
-        static void Decode(const std::string& input, std::vector<uint8_t>& out) {
+        static size_t Decode(const std::string& input, uint8_t* out) {
             if (input.size() % 4 != 0)
             {
                 throw "invalid base64 string length";
             }
             return Decode(input, base64DecodingTable, out);
+        }
+
+        static void Decode(const std::string& input, std::vector<uint8_t>& out) {
+            if (input.size() % 4 != 0)
+            {
+                throw "invalid base64 string length";
+            }
+            Decode(input, base64DecodingTable, out);
+        }
+
+        static size_t DecodeBase64URL(const std::string& input, uint8_t* out) {
+            int inputSizeMod4 = input.size() % 4;
+            if (inputSizeMod4 != 0)
+            {
+                std::string input2(input);
+                int paddings = 4 - inputSizeMod4;
+                for (int i = 0; i < paddings; i++)
+                {
+                    input2.push_back('=');
+                }
+                return Decode(input2, base64URLDecodingTable, out);
+            }
+            return Decode(input, base64URLDecodingTable, out);
         }
 
         static void DecodeBase64URL(const std::string& input, std::vector<uint8_t>& out) {
@@ -187,9 +229,10 @@ namespace macaron {
                 {
                     input2.push_back('=');
                 }
-                return Decode(input2, base64URLDecodingTable, out);
+                Decode(input2, base64URLDecodingTable, out);
+                return;
             }
-            return Decode(input, base64URLDecodingTable, out);
+            Decode(input, base64URLDecodingTable, out);
         }
 
     };
