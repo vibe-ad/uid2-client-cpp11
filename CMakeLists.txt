@@ -6,22 +6,25 @@ configure_file(VERSION.in VERSION @ONLY)
 
 option(WARNING_AS_ERROR "Treat compiler warnings as errors" ON)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 11 CACHE STRING "C++ standard version")
 set(CMAKE_CXX_FLAGS_DEBUG "-ggdb")
 add_compile_options(-Wall -Wextra)
 if(WARNING_AS_ERROR)
-	add_compile_options(-Werror)
+        add_compile_options(-Werror)
 endif()
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-	if (NOT DEFINED OPENSSL_ROOT_DIR)
-		set(OPENSSL_ROOT_DIR /usr/local/opt/openssl)
-	endif()
+        if (NOT DEFINED OPENSSL_ROOT_DIR)
+                set(OPENSSL_ROOT_DIR /usr/local/opt/openssl)
+        endif()
 endif()
 
 add_subdirectory(lib)
 
 add_subdirectory(app)
 
-enable_testing()
-add_subdirectory(test)
+include(CTest)
+
+if (BUILD_TESTING)
+        add_subdirectory(test)
+endif()
