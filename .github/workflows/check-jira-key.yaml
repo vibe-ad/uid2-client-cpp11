@@ -13,4 +13,4 @@ jobs:
   check_jira_key:
     runs-on: ubuntu-latest
     steps:
-      - uses: IABTechLab/uid2-shared-actions/actions/check_jira_key@v3
+      - uses: IABTechLab/uid2-shared-actions/actions/check_jira_key@80f547ce192dcafa414c5bf1df68d57310ce0349 # v3.104

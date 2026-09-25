@@ -13,4 +13,4 @@ permissions:
 jobs:
   zizmor:
     # Bare call: severity floors come from the shared workflow's defaults.
-    uses: IABTechLab/uid2-shared-actions/.github/workflows/shared-zizmor-scan.yaml@v3
+    uses: IABTechLab/uid2-shared-actions/.github/workflows/shared-zizmor-scan.yaml@80f547ce192dcafa414c5bf1df68d57310ce0349 # v3.104
