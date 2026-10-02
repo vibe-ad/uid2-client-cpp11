@@ -10,6 +10,34 @@
 
 #include <mutex>
 
+// Use shared mutex when compiling with C++ >= 17
+#if __cplusplus >= 201703
+#include <shared_mutex>
+using ContainerMutex = std::shared_mutex;
+namespace {
+auto ReadLock(ContainerMutex& mu)
+{
+    return std::shared_lock<ContainerMutex>(mu);
+}
+auto WriteLock(ContainerMutex& mu)
+{
+    return std::unique_lock<ContainerMutex>(mu);
+}
+}  // namespace
+#else
+using ContainerMutex = std::mutex;
+namespace {
+std::unique_lock<ContainerMutex> ReadLock(ContainerMutex& mu)
+{
+    return std::unique_lock<ContainerMutex>(mu);
+}
+std::unique_lock<ContainerMutex> WriteLock(ContainerMutex& mu)
+{
+    return std::unique_lock<ContainerMutex>(mu);
+}
+}  // namespace
+#endif
+
 namespace uid2 {
 struct UID2Client::Impl {
     std::string endpoint_;
@@ -19,7 +47,7 @@ struct UID2Client::Impl {
     httplib::Client httpClient_;
     std::shared_ptr<KeyContainer> container_;
     mutable std::recursive_mutex refreshMutex_;
-    mutable std::mutex containerMutex_;
+    mutable ContainerMutex containerMutex_;
 
     // NOLINTNEXTLINE(performance-unnecessary-value-param)
     Impl(std::string endpoint, std::string authKey, std::string secretKey, IdentityScope identityScope)
@@ -215,13 +243,13 @@ RefreshResult UID2Client::Impl::RefreshJson(const std::string& json)
 
 void UID2Client::Impl::SwapKeyContainer(const std::shared_ptr<KeyContainer>& newContainer)
 {
-    const std::lock_guard<std::mutex> lock(containerMutex_);
+    const auto lock = WriteLock(containerMutex_);
     this->container_ = std::shared_ptr<KeyContainer>{newContainer};
 }
 
 std::shared_ptr<KeyContainer> UID2Client::Impl::GetKeyContainer() const
 {
-    const std::lock_guard<std::mutex> lock(containerMutex_);
+    const auto lock = ReadLock(containerMutex_);
     return this->container_;
 }
 }  // namespace uid2
